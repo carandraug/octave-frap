@@ -1,0 +1,10 @@
+## The build dir.
+/target/
+
+## Sometimes created by an octave session.
+octave-workspace
+octave-core
+
+## Text editors create these.
+~.*
+*~
