@@ -6,17 +6,17 @@
 ## notice and this notice are preserved.  This file is offered as-is,
 ## without any warranty.
 
-PACKAGE = $(shell grep "^Name: " DESCRIPTION | cut -f2 -d" ")
-VERSION = $(shell grep "^Version: " DESCRIPTION | cut -f2 -d" ")
+PACKAGE := $(shell grep "^Name: " DESCRIPTION | cut -f2 -d" ")
+VERSION := $(shell grep "^Version: " DESCRIPTION | cut -f2 -d" ")
 
-TARGET_DIR      = target/
-RELEASE_DIR     = $(TARGET_DIR)$(PACKAGE)-$(VERSION)
-RELEASE_TARBALL = $(TARGET_DIR)$(PACKAGE)-$(VERSION).tar.gz
-HTML_DIR        = $(TARGET_DIR)$(PACKAGE)-html
-HTML_TARBALL    = $(TARGET_DIR)$(PACKAGE)-html.tar.gz
+TARGET_DIR      := target
+RELEASE_DIR     := $(TARGET_DIR)/$(PACKAGE)-$(VERSION)
+RELEASE_TARBALL := $(TARGET_DIR)/$(PACKAGE)-$(VERSION).tar.gz
+HTML_DIR        := $(TARGET_DIR)/$(PACKAGE)-html
+HTML_TARBALL    := $(TARGET_DIR)/$(PACKAGE)-html.tar.gz
 
-M_SOURCES   = $(wildcard inst/*.m)
-PKG_ADD     = $(shell grep -Pho '(?<=// PKG_ADD: ).*' $(M_SOURCES))
+M_SOURCES   := $(wildcard inst/*.m)
+PKG_ADD     := $(shell grep -Pho '(?<=// PKG_ADD: ).*' $(M_SOURCES))
 
 OCTAVE ?= octave --no-window-system --silent
 
@@ -34,31 +34,34 @@ help:
 	@echo
 	@echo "   clean   - Remove releases, html documentation, and oct files"
 
-%.tar.gz: %
-	tar -c -f - --posix -C "$(TARGET_DIR)" "$(notdir $<)" | gzip -9n > "$@"
+$(TARGET_DIR):
+	mkdir "$@"
 
-$(RELEASE_TARBALL): ../.git/$(shell git symbolic-ref HEAD)
+%.tar.gz: %
+	tar -c -f - --posix -C "$(TARGET_DIR)/" "$(notdir $<)" | gzip -9n > "$@"
+
+$(RELEASE_DIR): ./.git/index | $(TARGET_DIR)
 	@echo "Creating package version $(VERSION) release ..."
-	-rm -rf "$@"
-	if ! test -e $(TARGET_DIR); then mkdir $(TARGET_DIR); fi
-	git archive --prefix frap/ --format=tar HEAD | gzip -9n > "$@"
+	-$(RM) -r "$@"
+	git archive --prefix "$@/" --format=tar HEAD | tar -x
+	$(RM) "$@/.gitignore"
+	chmod -R a+rX,u+w,go-w "$@"
 
 $(HTML_DIR): install
 	@echo "Generating HTML documentation. This may take a while ..."
-	-rm -rf "$@"
+	-$(RM) -r "$@"
 	$(OCTAVE) \
 	  --eval "pkg load generate_html; " \
 	  --eval "pkg load $(PACKAGE);" \
 	  --eval 'generate_package_html ("${PACKAGE}", "$@", "octave-forge");'
-	chmod -R a+rX,u+w,go-w $@
+	chmod -R a+rX,u+w,go-w "$@"
 
 dist: $(RELEASE_TARBALL)
 html: $(HTML_TARBALL)
 
 release: dist html
 	md5sum $(RELEASE_TARBALL) $(HTML_TARBALL)
-	@echo "Upload @ https://sourceforge.net/p/octave/package-releases/new/"
-	@echo 'Execute: hg tag "release-${VERSION}"'
+	@echo 'Execute: git tag "release-${VERSION}"'
 
 install: $(RELEASE_TARBALL)
 	@echo "Installing package locally ..."
@@ -71,4 +74,4 @@ run:
 	$(OCTAVE) --persist  --path "inst/" --eval '${PKG_ADD}'
 
 clean:
-	rm -rf $(TARGET_DIR)
+	$(RM) -r $(TARGET_DIR)
