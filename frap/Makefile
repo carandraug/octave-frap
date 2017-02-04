@@ -56,10 +56,10 @@ install: $(RELEASE_TARBALL)
 	@echo "Installing package locally ..."
 	$(OCTAVE) --eval 'pkg ("install", "${RELEASE_TARBALL}")'
 
-check: all
+check:
 	$(OCTAVE) --path "inst/" --eval '${PKG_ADD}' --eval 'runtests ("inst");'
 
-run: all
+run:
 	$(OCTAVE) --persist  --path "inst/" --eval '${PKG_ADD}'
 
 clean:
