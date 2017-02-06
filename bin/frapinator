@@ -534,6 +534,7 @@ for iGeneral = 1:length(main.file_list)
   endif
 
   if (options.print_plot)
+    figure ("visible", "off");
     subplot(2, 3, 1)
     plot (image.timestamps, [backg.xy_mean; bleach.xy_mean; nucleus.xy_mean])
     title("Background, bleach and nucleus intensity")
