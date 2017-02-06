@@ -1,6 +1,6 @@
 #!/usr/bin/env octave
 ##
-## Copyright (C) 2010, 2015 Carnë Draug <carandraug+dev@gmail.com>
+## Copyright (C) 2010, 2015, 2017 Carnë Draug <carandraug+dev@gmail.com>
 ##
 ## This program is free software; you can redistribute it and/or modify
 ## it under the terms of the GNU General Public License as published by
@@ -22,48 +22,219 @@ javaMethod ("enableLogging", "loci.common.DebugTools", "ERROR");
 more off;
 page_output_immediately (1);
 
+## SYNOPSIS
+##    frapinator [--no-masks] [--no-data] [--no-plots] OPTION_STRUCT INPUT_IMAGES
+##
+## DESCRIPTION
+##
+##    OPTION_STRUCT is the path for a file that can be loaded by Octave
+##      with load().  It must have a scalar struct named options that
+##      configure how frapinator works.
+##
+##    INPUT_IMAGE path for an image to be read by bioformats.
+##      Multiple options can be specified.
+##
+## OPTIONS
+##
+##   --no-mask
+##       By default, frapinator will save a tif showing the masks
+##       automatically found.  This option disables this.
+##
+##   --no-plot
+##       By default, frapinator will save a png showing the plots of
+##       the fits, and raw frap data.  This option disables this.
+##
+##   --no-data
+##       By default, frapinator will save a txt with all the data
+##       found and options used.  This option disables this.
+##
+##   --interactive
+##       Show GUI to select images for analysis.
+##
+##  --progress
+##       Show progress bar (requires graphical server)
 
-## Store versions of everything in the system for log files
-main.versions = ver ();
 
-#############
-## Options ##
-#############
+## exit_with_error (STATUS_CODE, TEMPLATE, ...)
+## exit_with_error (TEMPLATE, ...)
+function exit_with_error (status, template, varargin)
+  if (! isnumeric (status))
+    args = {template, varargin{:}};
+    template = status;
+    status = 1;
+  else
+    args = varargin;
+  endif
+  fprintf (stderr (), template, varargin{:});
+  exit (status);
+endfunction
 
-## TODO we should have a way to set them interactively or by command-line
-##      * should implement getopt in octave core
 
-## Flags
-options.flag_threshold  = 1;      # 0 = automatic threshold using Otsu's method; 1 = manually set threshold in threshold_value
-options.flag_correct    = 1;      # Photobleach correction. 0 = infinite nucleus (no fluorescence loss); 1 = finite nucleus (fluorescence loss)
-options.flag_log_image  = 1;      # 0 = no log image is saved; 1 = log image with important frames and masks is saved
-options.flag_fit_data   = 1;      # Data used for fitting. 1 = logaritmic binned; 2 = data from processed images
-options.flag_timestamps = 1;      # 0 = uses options.tScan to calculate timestamps; 1= reads timestamps from image file
-options.flag_frames     = 1;      # 0 = uses the user defined nFrames; 1 = uses extracted number of frames as nFrames;
+## Maybe I implement getopt in Octave itself.  It's about time.
+function [cmd_line_options, cmd_line_args] = get_options ()
+  cmd_line_options = cell ();
+  cmd_line_args = cell ();
 
-## Variables for image processing
-options.nFrames         = 2000;   # Number of total frames in the image (should be replaced later for length(imfinfo(file_path))
-options.nPre_bleach     = 100;    # Number of prebleach frames
-options.tScan           = 0.033;  # Scan time for one frame [s]
-options.bleach_diameter = 40;     # Diameter of bleached area [px]
-options.pixel_size      = 0.1;    # Size of a pixel [µm]
-options.avg_start       = 10;     # Number of start frame to use when averaging to create image where to find background and cell nucleus
-options.avg_end         = 100;    # Number of final frame to use when averaging to create image where to find background and cell nucleus
-options.pre_start       = 50;     # Number of start frame to use when averaging to create pre-bleach image where to find bleach spot
-options.pre_end         = 100;    # Number of final frame to use when averaging to create pre-bleach image where to find bleach spot
-options.post_start      = 101;    # Number of start frame to use when averaging to create post-bleach image where to find bleach spot
-options.post_end        = 105;    # Number of final frame to use when averaging to create post-bleach image where to find bleach spot
+  args = argv ();
+  stop = false;
+  for idx = 1:numel (args)
+    arg = args{idx};
+    if (strcmp (arg, "--"))
+      stop = true;
+    elseif (! stop && strncmp ("--", arg, 2))
+      cmd_line_options{end+1} = arg;
+    else
+      cmd_line_args{end+1} = arg;
+    endif
+  endfor
+endfunction
 
-options.backg_size      = 30;     # Width (and height) in pixels of the background area
-options.threshold_value = 20;     # Intensity to threshold the first image. Only needed if flag_threshold > 0
-options.nNorm           = 10;     # Number of frames, previous to bleach frame, to use for normalization
-options.binning_start   = 20;     # Number of frames after the bleach to skip before start binning
-options.bleach_factor   = 1.25;   # Factor of change to measure the bleach area from the diameter of the bleach spot
 
-## Variables for data fitting
-options.resolution      = 2.5;    # Resolution of the image. Will be used for fitting of radial profile
-options.nSkip_profile   = 3;      # Number of radial point which get skipped when fitting the radial intensity profile
-options.Df              = 200;    # Initial guess for Df
+function fpaths = get_files_to_do (cmd_line_options, cmd_line_args)
+  narginchk (2, 2);
+  fpaths = {};
+  if (any (strcmp (cmd_line_options, "--interactive")))
+    [fname, fpath] = uigetfile ({"*.tif;*.tiff", "TIFF-files"},
+                                "Select images to analyze",
+                                "MultiSelect", "on");
+    if (isequal (fname, 0))
+      exit_with_error ("No files selected after interactive mode");
+    elseif (iscell (fname))
+      fpaths = fullfile (fpath, fname);
+    else
+      fpaths = fullfile (fpath, {fname});
+    endif
+  endif
+  ## The first argument is the options file, everything else to the
+  ## end are images to analyse.
+  fpaths = [fpaths(:); cmd_line_args(2:end)];
+endfunction
+
+
+function validate_options (options)
+
+  ##
+  ## Flags
+  ##
+
+  ## options.flag_threshold  = 1;
+  ## 0 = automatic threshold using Otsu's method;
+  ## 1 = manually set threshold in threshold_value
+
+  ## options.flag_correct    = 1;
+  ## Photobleach correction.
+  ## 0 = infinite nucleus (no fluorescence loss);
+  ## 1 = finite nucleus (fluorescence loss)
+
+  ## options.flag_fit_data   = 1;
+  ## Data used for fitting.
+  ## 1 = logaritmic binned;
+  ## 2 = data from processed images
+
+  ## options.flag_timestamps = 1;
+  ## 0 = uses options.tScan to calculate timestamps;
+  ## 1= reads timestamps from image file
+
+  ## options.flag_frames     = 1;
+  ## 0 = uses the user defined nFrames;
+  ## 1 = uses extracted number of frames as nFrames;
+
+  ##
+  ## Variables for image processing
+  ##
+
+  ## options.nFrames         = 2000;
+  ## Number of total frames in the image (should be replaced later for
+  ## length(imfinfo(file_path))
+
+  ## options.nPre_bleach     = 100;
+  ## Number of prebleach frames
+
+  ## options.tScan           = 0.033;
+  ## Scan time for one frame [s]
+
+  ## options.bleach_diameter = 40;
+  ## Diameter of bleached area [px]
+
+  ## options.pixel_size      = 0.1;
+  ## Size of a pixel [µm]
+
+  ## options.avg_start       = 10;
+  ## Number of start frame to use when averaging to create image where
+  ## to find background and cell nucleus
+
+  ## options.avg_end         = 100;
+  ## Number of final frame to use when averaging to create image where
+  ## to find background and cell nucleus
+
+  ## options.pre_start       = 50;
+  ## Number of start frame to use when averaging to create pre-bleach
+  ## image where to find bleach spot
+
+  ## options.pre_end         = 100;
+  ## Number of final frame to use when averaging to create pre-bleach
+  ## image where to find bleach spot
+
+  ## options.post_start      = 101;
+  ## Number of start frame to use when averaging to create post-bleach
+  ## image where to find bleach spot
+
+  ## options.post_end        = 105;
+  ## Number of final frame to use when averaging to create post-bleach
+  ## image where to find bleach spot
+
+  ## options.backg_size      = 30;
+  ## Width (and height) in pixels of the background area
+
+  ## options.threshold_value = 20;
+  ## Intensity to threshold the first image. Only needed if flag_threshold > 0
+
+  ## options.nNorm           = 10;
+  ## Number of frames, previous to bleach frame, to use for normalization
+
+  ## options.binning_start   = 20;
+  ## Number of frames after the bleach to skip before start binning
+
+  ## options.bleach_factor   = 1.25;
+  ## Factor of change to measure the bleach area from the diameter of
+  ## the bleach spot
+
+  ##
+  ## Variables for data fitting
+  ##
+
+  ## options.resolution      = 2.5;
+  ## Resolution of the image. Will be used for fitting of radial profile
+
+  ## options.nSkip_profile   = 3;
+  ## Number of radial point which get skipped when fitting the radial
+  ## intensity profile
+
+  ## options.Df              = 200;
+  ## Initial guess for Df
+
+  if (options.nNorm > options.nPre_bleach)
+    exit_with_error (["number of frames to use for normalization of values" ...
+                        " (%g) is larger than number of pre-bleach frames (%g)"],
+                     options.nNorm, options.nPre_bleach);
+  elseif (options.binning_start < 0 )
+    exit_with_error (["number of frames that should be skipped before start" ...
+                        " binning is lower than zero (%g)"],
+                     options.binning_start);
+  elseif (options.avg_start > options.avg_end)
+    exit_with_error (["frame number to start averaging for finding" ...
+                        " background (%g) is after the frame number to end (%g)"],
+                     options.avg_start, optons.avg_end);
+  elseif (options.pre_start > options.pre_end)
+    exit_with_error (["frame number to start averaging for the pre-bleach" ...
+                        " image (%g), is after the frame number to end (%g)"],
+                     options.pre_start, optons.pre_end);
+  elseif (options.post_start > options.post_end)
+    exit_with_error (["frame number to start averaging for the post-bleach" ...
+                        " image (%g), is after the frame number to end (%g)"],
+                     options.ost_start, optons.post_end);
+  endif
+endfunction
 
 
 ## Reads the first NFRAMES from the image FPATH.  If NFRAMES is ommited,
@@ -88,64 +259,57 @@ function [img] = read_image (fpath, nframes)
 endfunction
 
 
+[cmd_line_options, cmd_line_args] = get_options ();
+if (numel (cmd_line_args) < 1)
+  exit_with_error ("min of one argument is required, a filename with options");
+endif
+print_plot = ! any (strcmp (cmd_line_options, "--no-plot"));
+print_mask = ! any (strcmp (cmd_line_options, "--no-mask"));
+print_data = ! any (strcmp (cmd_line_options, "--no-data"));
+progress = any (strcmp (cmd_line_options, "--progress"));
 
-#################
-## Input check ##
-#################
 
-if (options.nNorm > options.nPre_bleach)
-  error ("The number of frames to use for normalization of values (%g) is larger than the number of pre-bleach frames (%g)", options.nNorm, options.nPre_bleach);
-elseif (options.binning_start < 0 )
-  error ("The number of frames that should be skipped before start binning is lower than zero (%g)", options.binning_start)
-elseif (options.avg_start > options.avg_end)
-  error ("The frame number to start averaging for finding background (%g), is after the frame number to end (%g)", options.avg_start, optons.avg_end)
-elseif (options.pre_start > options.pre_end)
-  error ("The frame number to start averaging for the pre-bleach image (%g), is after the frame number to end (%g)", options.pre_start, optons.pre_end)
-elseif (options.post_start > options.post_end)
-  error ("The frame number to start averaging for the post-bleach image (%g), is after the frame number to end (%g)", options.ost_start, optons.post_end)
+options_fpath = cmd_line_args{1};
+try
+  load (options_fpath);
+catch
+  exit_with_error ("Failed to read options file '%s': %s",
+                   options_fpath, lasterr ());
+end_try_catch
+if (! exist ("options", "var") || ! isstruct (options) || ! isscalar (options))
+  error ("frapinator: no scalar struct named otions found in '%s'",
+         options_fpath);
+endif
+validate_options (options);
+options.print_plot = print_plot;
+options.print_mask = print_mask;
+options.print_data = print_data;
+options.progress = progress;
+
+## Store versions of everything in the system for log files
+main.versions = ver ();
+
+main.file_list = get_files_to_do (cmd_line_options, cmd_line_args);
+nImg = numel (main.file_list);
+if (options.progress)
+  paths.bar_handle = waitbar (0, sprintf ("Image %i of %i", 0, nImg),
+                              "Name", "FRAPINATOR");
 endif
 
-################
-## User input ##
-################
-
-## Get file list of files from user
-if (isempty (argv ()))
-  [fname, fpath] = uigetfile ({"*.tif;*.tiff", "TIFF-files"},
-                              "Select images to analyze",
-                              "MultiSelect", "on");
-  if (isequal (fname, 0))
-    error ("No files selected");
-  else
-    main.file_list = fullfile (fpath, fname);
-    if (! iscell (main.file_list))
-      main.file_list = {main.file_list};
-    endif
-  endif
-else
-  main.file_list = argv ();
-end
-
-nImg = numel (main.file_list);
-paths.bar_handle = waitbar (0,
-  sprintf ("Image %i of %i", 0, nImg),
-  "Name", "FRAPINATOR"
-);
-
 ######################## Start of the big loop #################################
-for iGeneral = 1:length(main.file_list)
 
+for iGeneral = 1:length(main.file_list)
   file.path             = main.file_list{iGeneral};
   [file.dir, file.name] = fileparts (file.path);
   file.log_path         = [file.dir, filesep, "masks_", file.name, ".tif"];
   file.extracted_path   = [file.dir, filesep, "extracted_data_", file.name, ".txt"];
   file.plots_path       = [file.dir, filesep, "plots_", file.name, ".png"];
 
-  waitbar (
-    (iGeneral-1) / nImg,
-    paths.bar_handle,
-    sprintf ("Image %d of %d - processing", iGeneral, nImg)
-  );
+  if (options.progress)
+    waitbar ((iGeneral-1) / nImg,
+             paths.bar_handle,
+             sprintf ("Image %d of %d - processing", iGeneral, nImg));
+  endif
 
   try
 
@@ -162,7 +326,9 @@ for iGeneral = 1:length(main.file_list)
         options.nFrames = numel(image.timestamps);
       else
         if (numel(image.timestamps) < options.nFrames)
-          error ("Number of timestamps found '%g' was larger than the defined number of frames '%g'.", numel(image.timestamps), options.nFrames)
+          error (["Number of timestamps found '%g' was larger than the" ...
+                    " defined number of frames '%g'."],
+                 numel(image.timestamps), options.nFrames)
         endif
         image.timestamps = image.timestamps(1:options.nFrames);
       endif
@@ -171,11 +337,11 @@ for iGeneral = 1:length(main.file_list)
     endif
 
     ## Open the image
-    image.here = read_image(file.path, options.nFrames);
+    image.here = read_image (file.path, options.nFrames);
     image.here = squeeze (image.here);
-
     if (ndims(image.here) != 3)
-      error ("Image from file '%s' has not 3 dimensions. It has %g dimensions. Skipping file", file.path, ndims(image.here));
+      error (["Image from file '%s' has not 3 dimensions. It has %g " ...
+                " dimensions. Skipping file"], file.path, ndims(image.here));
       clear -exclusive options main paths;
       continue
     endif
@@ -191,44 +357,52 @@ for iGeneral = 1:length(main.file_list)
     image.bleach      = double(image.slice_pre) - double(image.slice_post);
 
     ##
-    ## Finds ROIs, calculate averages, make corrections to data and calculate profile
+    ## Finds ROIs, calculate averages, make corrections to data and
+    ## calculate profile
     ##
     [backg.index, boundaries.backg] ...
-      = finder_background (image.slice_avg, options.backg_size);
+    = finder_background (image.slice_avg, options.backg_size);
 
     [bleach.index, bleach.center, bleach.radius, boundaries.bleach] ...
-      = finder_bleach (image.bleach, options.bleach_diameter, options.bleach_factor);
+      = finder_bleach (image.bleach, options.bleach_diameter,
+                       options.bleach_factor);
 
     [nucleus.index, boundaries.nucleus] ...
       = finder_nucleus (image.slice_avg, bleach.center, options.threshold_value,
                         options.flag_threshold);
 
-    ## Create and save log image
-    # This comes before checking if nucleus is found correctly so that in case stdout is lost, the log image will still show the wrong nucleus
-    if (options.flag_log_image == 1)
+    ## This comes before checking if nucleus is found correctly so
+    ## that in case stdout is lost, the log image will still show the
+    ## wrong nucleus
+    if (options.print_mask)
       log_image (
-        image.slice_avg,
-        image.slice_pre,
-        image.slice_post,
-        image.bleach,
-        boundaries.backg,
-        boundaries.bleach,
-        boundaries.nucleus,
-        file.log_path
-      );
+          image.slice_avg,
+          image.slice_pre,
+          image.slice_post,
+          image.bleach,
+          boundaries.backg,
+          boundaries.bleach,
+          boundaries.nucleus,
+          file.log_path
+        );
     endif
 
     ##Check if nucleus found is correct and skip this image if it is not
     if (numel(nucleus.index) == 0)
-      printf ("Didn't found nucleus in '%s'. Maybe threshold value set too high?", file.path);
+      printf ("Didn't found nucleus in '%s'. Maybe threshold set too high?",
+              file.path);
       clear -exclusive options main paths;
       continue
     elseif (numel(bleach.index) > numel(nucleus.index))
-      printf ("Skipped analysis of '%s' because found cell region '%g'[px] smaller than bleach spot '%g'[px].", file.path, numel(nucleus.index), numel(bleach.index));
+      printf (["Skipped analysis of '%s' because found cell region" ...
+                 " '%g'[px] smaller than bleach spot '%g'[px]"],
+              file.path, numel(nucleus.index), numel(bleach.index));
       clear -exclusive options main paths;
       continue
     elseif (numel(nucleus.index) == (image.height * image.width))
-      printf ("Nucleus found in '%s' the size of the whole frame '%g'[px]. Maybe threshold value set to low?", file.path, numel(nucleus.index));
+      printf (["Nucleus found in '%s' the size of the whole frame" ...
+                 " '%g'[px]. Maybe threshold value set to low?"],
+              file.path, numel(nucleus.index));
       clear -exclusive options main paths;
       continue
     endif
@@ -255,7 +429,9 @@ for iGeneral = 1:length(main.file_list)
     ## Normalize curve
     bleach.norm_factor        = mean( bleach.xy_mean(options.nPre_bleach-options.nNorm+1 : options.nPre_bleach) );
     bleach.normalized_xy_mean = bleach.xy_mean / bleach.norm_factor;
-    ## Calculate value (normalized) that bleach spot should reach to have full recovery
+
+    ## Calculate value (normalized) that bleach spot should reach to
+    ## have full recovery
     bleach.full_recovery      = nucleus.xy_mean(options.nPre_bleach+1) / nucleus.xy_mean(options.nPre_bleach);
 
     ## Logarithmic binning of the FRAP curve
@@ -265,8 +441,9 @@ for iGeneral = 1:length(main.file_list)
                                 options.binning_start);
 
     ## Extract Profiles
-    # profile.normalized_intensities is a matrix with all intensities values with each row representing
-    # a time frame and each column the distance from the center of bleach spot
+    ## profile.normalized_intensities is a matrix with all intensities
+    ## values with each row representing a time frame and each column
+    ## the distance from the center of bleach spot
     [profile.normalized_intensities, profile.distances] ...
       = calculator_profile (image.here, options.nFrames, options.nPre_bleach,
                             options.nNorm, bleach.center, bleach.radius);
@@ -274,11 +451,11 @@ for iGeneral = 1:length(main.file_list)
     ## Get rid of the image
     image = rmfield (image, "here");
 
-    waitbar (
-      (iGeneral-0.5) / nImg,
-      paths.bar_handle,
-      sprintf ("Image %d of %d - fitting", iGeneral, nImg)
-    );
+    if (options.progress)
+      waitbar ((iGeneral-0.5) / nImg,
+               paths.bar_handle,
+               sprintf ("Image %d of %d - fitting", iGeneral, nImg));
+    endif
 
     ##
     ## Do all the fitting
@@ -300,7 +477,8 @@ for iGeneral = 1:length(main.file_list)
 
     ## Fitting of the radial profile
     [profile.rCon, profile.sigma, profile.theta, profile.fitted] ...
-      = fitter_radial_profile (profile.distances, profile.normalized_intensities(:,options.nPre_bleach+1), 
+      = fitter_radial_profile (profile.distances,
+                               profile.normalized_intensities(:,options.nPre_bleach+1),
                                options.nSkip_profile, options.resolution);
 
     profile.nuclear_radius = calculator_nuclear_radius (
@@ -322,7 +500,8 @@ for iGeneral = 1:length(main.file_list)
     full_model_2.Df = FullModel_preProcess{1};
     ## Fitting with 2 parameters (kon and koff)
     [full_model_2.yFitted, full_model_2.kon, full_model_2.koff, full_model_2.grid ] ...
-      = fitter_FullModel_2parameters (fitting_times, fitting_intensities, FullModel_preProcess);
+      = fitter_FullModel_2parameters (fitting_times, fitting_intensities,
+                                      FullModel_preProcess);
 
     ## Fitting with 3 parameters (kon, koff and Df)
     [full_model_3.yFitted, full_model_3.kon, full_model_3.koff, full_model_3.Df] ...
@@ -338,63 +517,68 @@ for iGeneral = 1:length(main.file_list)
     continue
   end_try_catch
 
-  # Save processed data (list of variables to save)
-  save ("-text", file.extracted_path,
-    "main", ...
-    "options", ...
-    "image", ...
-    "backg", ...
-    "nucleus", ...
-    "bleach", ...
-    "log_bin", ...
-    "profile", ...
-    "pure_diffusion", ...
-    "full_model_2", ...
-    "full_model_3")
+  ## Save processed data (list of variables to save)
+  if (options.print_data)
+    save ("-text", file.extracted_path,
+          "main", ...
+          "options", ...
+          "image", ...
+          "backg", ...
+          "nucleus", ...
+          "bleach", ...
+          "log_bin", ...
+          "profile", ...
+          "pure_diffusion", ...
+          "full_model_2", ...
+          "full_model_3");
+  endif
 
-  subplot(2, 3, 1)
-  plot (image.timestamps, [backg.xy_mean; bleach.xy_mean; nucleus.xy_mean])
-  title("Background, bleach and nucleus intensity")
-  axis ([0 (image.timestamps(end)+1) 0 40])
+  if (options.print_plot)
+    subplot(2, 3, 1)
+    plot (image.timestamps, [backg.xy_mean; bleach.xy_mean; nucleus.xy_mean])
+    title("Background, bleach and nucleus intensity")
+    axis ([0 (image.timestamps(end)+1) 0 40])
 
-  subplot(2, 3, 2)
-  plot (image.timestamps, bleach.normalized_xy_mean)
-  title("Normalized average of bleach intensity")
-  axis ([0 (image.timestamps(end)+1) 0.2 1.2])
+    subplot(2, 3, 2)
+    plot (image.timestamps, bleach.normalized_xy_mean)
+    title("Normalized average of bleach intensity")
+    axis ([0 (image.timestamps(end)+1) 0.2 1.2])
 
-  subplot(2, 3, 3)
-  plot (profile.distances(options.nSkip_profile+1:end), [profile.normalized_intensities(options.nSkip_profile+1:end,options.nPre_bleach+1), profile.fitted])
-  title("Profile of the bleach spot")
-  text (3,0.9, ["rCon = ", num2str(profile.rCon)])
-  text (3,0.8, ["sigma = ", num2str(profile.sigma)])
-  text (3,0.7, ["theta = ", num2str(profile.theta)])
-  axis ([0 (profile.distances(end)) 0 1.2])
+    subplot(2, 3, 3)
+    plot (profile.distances(options.nSkip_profile+1:end), [profile.normalized_intensities(options.nSkip_profile+1:end,options.nPre_bleach+1), profile.fitted])
+    title("Profile of the bleach spot")
+    text (3,0.9, ["rCon = ", num2str(profile.rCon)])
+    text (3,0.8, ["sigma = ", num2str(profile.sigma)])
+    text (3,0.7, ["theta = ", num2str(profile.theta)])
+    axis ([0 (profile.distances(end)) 0 1.2])
 
-  subplot(2, 3, 4)
-  plot (fitting_times, [fitting_intensities pure_diffusion.yFitted])
-  title("Fitting for Pure Diffusion")
-  text (20,0.5, ["Df = ", num2str(pure_diffusion.Df)])
-  axis ([0 fitting_times(end) 0.2 1])
+    subplot(2, 3, 4)
+    plot (fitting_times, [fitting_intensities pure_diffusion.yFitted])
+    title("Fitting for Pure Diffusion")
+    text (20,0.5, ["Df = ", num2str(pure_diffusion.Df)])
+    axis ([0 fitting_times(end) 0.2 1])
 
-  subplot(2, 3, 5)
-  plot (fitting_times, [fitting_intensities full_model_2.yFitted])
-  title("Fitting with Full Model (Kon Koff)")
-  text (20,0.4, ["Kon = ", num2str(full_model_2.kon)])
-  text (20,0.3, ["Koff = ", num2str(full_model_2.koff)])
-  axis ([0 fitting_times(end) 0.2 1])
+    subplot(2, 3, 5)
+    plot (fitting_times, [fitting_intensities full_model_2.yFitted])
+    title("Fitting with Full Model (Kon Koff)")
+    text (20,0.4, ["Kon = ", num2str(full_model_2.kon)])
+    text (20,0.3, ["Koff = ", num2str(full_model_2.koff)])
+    axis ([0 fitting_times(end) 0.2 1])
 
-  subplot(2, 3, 6)
-  plot (fitting_times, [fitting_intensities full_model_3.yFitted])
-  title("Fitting with Full Model (Kon Koff Df)")
-  text (20,0.5, ["Df = ", num2str(full_model_3.Df)])
-  text (20,0.4, ["Kon = ", num2str(full_model_3.kon)])
-  text (20,0.3, ["Koff = ", num2str(full_model_3.koff)])
-  axis ([0 fitting_times(end) 0.2 1])
+    subplot(2, 3, 6)
+    plot (fitting_times, [fitting_intensities full_model_3.yFitted])
+    title("Fitting with Full Model (Kon Koff Df)")
+    text (20,0.5, ["Df = ", num2str(full_model_3.Df)])
+    text (20,0.4, ["Kon = ", num2str(full_model_3.kon)])
+    text (20,0.3, ["Koff = ", num2str(full_model_3.koff)])
+    axis ([0 fitting_times(end) 0.2 1])
 
-  print (file.plots_path, "-dpng", "-S1680,1050")
+    print (file.plots_path, "-dpng", "-S1680,1050")
+  endif
 
   clear -exclusive options main paths;
-
 endfor
 
-close (paths.bar_handle);
+if (options.progress)
+  close (paths.bar_handle);
+endif
